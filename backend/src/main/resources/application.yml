@@ -1,0 +1,238 @@
+spring:
+  application:
+    name: rag-service
+  
+  profiles:
+    active: dev
+  
+  # 数据源配置
+  datasource:
+    url: jdbc:postgresql://localhost:5432/rag_db
+    username: rag_user
+    password: rag_password
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 300000
+      connection-timeout: 30000
+      
+  # JPA配置
+  jpa:
+    hibernate:
+      ddl-auto: update
+      naming:
+        physical-strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        
+  # Elasticsearch配置
+  elasticsearch:
+    uris: http://localhost:9200
+    connection-timeout: 10s
+    socket-timeout: 30s
+    
+  # Redis配置
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 6000ms
+      lettuce:
+        pool:
+          max-active: 10
+          max-idle: 10
+          min-idle: 1
+          time-between-eviction-runs: 30s
+          
+  # Cache配置
+  cache:
+    type: redis
+    redis:
+      time-to-live: 3600s
+      
+  # Servlet配置
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+      
+  # Security配置
+  security:
+    user:
+      name: admin
+      password: admin123
+      roles: ADMIN
+
+  # Spring AI配置
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: qwen3:14b
+          temperature: 0.7
+          top_p: 0.9
+          num_predict: 2048
+      embedding:
+        options:
+          model: nomic-embed-text
+    vectorstore:
+      elasticsearch:
+        initialize-schema: true
+        index-name: rag_vectors
+        dimensions: 768
+        similarity: cosine
+
+# 管理端点配置
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,env
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    prometheus:
+      metrics:
+        export:
+          enabled: true
+
+# 服务器配置
+server:
+  port: 8080
+
+# 日志配置
+logging:
+  level:
+    com.example: DEBUG
+    org.springframework.ai: INFO
+    org.springframework.data.elasticsearch: INFO
+    org.elasticsearch: WARN
+    root: INFO
+  pattern:
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/rag-service.log
+    max-size: 100MB
+    max-history: 30
+
+# 应用自定义配置
+app:
+  # RAG配置
+  rag:
+    chunk-size: 1000
+    chunk-overlap: 200
+    similarity-threshold: 0.7
+    max-context-length: 8000  # 增加基础上下文长度
+    enable-multi-round: true  # 启用多轮查询
+    max-rounds: 3            # 最大查询轮数
+    
+  # 文件上传配置  
+  upload:
+    path: ./uploads
+    max-size: 52428800  # 50MB
+    allowed-types: pdf,txt,md,docx,doc
+    
+  # 模型配置
+  model:
+    chat:
+      fast: qwen3:14b      # 快速响应模型
+      quality: qwen3:32b   # 高质量模型
+      switch-threshold: 100 # 问题复杂度阈值
+    embedding:
+      default: nomic-embed-text
+      fallback: all-minilm:l6-v2
+      
+  # 缓存配置
+  cache:
+    ttl: 3600
+    max-size: 1000
+
+---
+# 开发环境配置
+spring:
+  config:
+    activate:
+      on-profile: dev
+      
+  # 开发环境数据源
+  datasource:
+    url: jdbc:postgresql://localhost:5432/rag_db
+    
+  # JPA开发配置
+  jpa:
+    show-sql: true
+    hibernate:
+      ddl-auto: update
+      
+logging:
+  level:
+    com.example: DEBUG
+    root: INFO
+
+---
+# Docker环境配置
+spring:
+  config:
+    activate:
+      on-profile: docker
+      
+  # Docker环境数据源
+  datasource:
+    url: jdbc:postgresql://postgres:5432/rag_db
+    
+  # Docker环境Elasticsearch
+  elasticsearch:
+    uris: http://elasticsearch:9200
+    
+  # Docker环境Redis
+  data:
+    redis:
+      host: redis
+      
+  # Spring AI Docker配置
+  ai:
+    ollama:
+      base-url: http://host.docker.internal:11434
+
+# Docker环境应用配置
+app:
+  upload:
+    path: /app/uploads
+    max-size: 52428800  # 50MB
+    allowed-types: pdf,txt,md,docx,doc
+
+logging:
+  level:
+    com.example: INFO
+    root: WARN
+
+---
+# 生产环境配置
+spring:
+  config:
+    activate:
+      on-profile: prod
+      
+  # 生产环境JPA配置
+  # jpa:
+  #   show-sql: false
+  #   hibernate:
+  #     ddl-auto: validate
+      
+  # 生产环境安全配置
+  # security:
+  #   require-ssl: true
+
+logging:
+  level:
+    com.example: WARN
+    root: ERROR
+  file:
+    name: /app/logs/rag-service.log 

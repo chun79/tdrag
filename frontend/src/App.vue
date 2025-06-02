@@ -1,0 +1,73 @@
+<template>
+  <div id="app">
+    <router-view />
+  </div>
+</template>
+
+<script setup lang="ts">
+// RAG Web Service - 主应用组件
+</script>
+
+<style lang="scss">
+#app {
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+}
+
+// 全局样式重置
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 
+               'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
+  line-height: 1.6;
+  color: var(--el-text-color-primary);
+  background-color: var(--el-bg-color-page);
+}
+
+// 滚动条样式
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--el-fill-color-light);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--el-fill-color-dark);
+  border-radius: 3px;
+  
+  &:hover {
+    background: var(--el-color-primary-light-3);
+  }
+}
+
+// Element Plus 自定义主题
+:root {
+  --el-color-primary: #409eff;
+  --el-border-radius-base: 6px;
+  --el-font-size-base: 14px;
+}
+
+// 响应式设计
+@media (max-width: 768px) {
+  .el-main {
+    padding: 10px;
+  }
+  
+  .el-header {
+    height: 50px !important;
+    line-height: 50px;
+  }
+}
+</style> 
