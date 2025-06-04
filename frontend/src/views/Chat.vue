@@ -15,7 +15,12 @@
         <div class="message-bubble">
           <div class="message-header">
             <span class="message-sender">{{ message.type === 'user' ? '您' : '参考咨询助手' }}</span>
-            <span class="message-time">{{ message.time }}</span>
+            <div class="message-time-info">
+              <span class="message-time">{{ message.time }}</span>
+              <span v-if="message.duration && message.duration > 0 && message.type === 'user'" class="message-duration">
+                ({{ message.duration }}ms)
+              </span>
+            </div>
           </div>
           
           <!-- 来源标识 -->
@@ -118,6 +123,7 @@ interface Message {
   typing?: boolean
   thinking?: string
   thinkingCollapsed?: boolean
+  duration?: number  // 添加用时字段，单位毫秒
 }
 
 const messages = ref<Message[]>([
@@ -181,11 +187,15 @@ const getSourceTagType = (sourceType: string) => {
 const sendMessage = async () => {
   if (!inputMessage.value.trim() || loading.value) return
   
+  // 记录开始时间
+  const startTime = Date.now()
+  
   const userMessage: Message = {
     id: Date.now(),
     type: 'user',
     content: inputMessage.value,
-    time: new Date().toLocaleTimeString()
+    time: new Date().toLocaleTimeString(),
+    duration: 0  // 初始化为0，稍后更新
   }
   
   messages.value.push(userMessage)
@@ -258,7 +268,7 @@ const sendMessage = async () => {
         // 发送思考内容
         const thinkContent = contentBuffer.substring(0, thinkEnd)
         if (thinkContent.trim()) {
-          console.log('Adding thinking content length:', thinkContent.length)
+          console.log('Adding thinking content length:', thinkContent.length, 'Content:', thinkContent.substring(0, 100))
           botMessage.thinking += thinkContent
         }
         
@@ -284,15 +294,21 @@ const sendMessage = async () => {
     
     // 处理剩余内容
     if (contentBuffer.length > 0) {
-      // 如果缓冲区内容较多，或者不包含可能的标签开始，就发送内容
-      const shouldSend = contentBuffer.length > 20 || 
-                        (!contentBuffer.includes('<') && !contentBuffer.includes('>'))
-      
-      if (shouldSend) {
-        if (inThinking) {
-          console.log('Adding to thinking, length:', contentBuffer.length)
-          botMessage.thinking += contentBuffer
-        } else {
+      if (inThinking) {
+        // 在思考模式下，更宽松的条件：只要有内容就添加，不要过早清空缓冲区
+        console.log('Adding to thinking, length:', contentBuffer.length, 'Content:', contentBuffer.substring(0, 50))
+        botMessage.thinking += contentBuffer
+        contentBuffer = ''
+        
+        // 强制触发Vue响应式更新
+        await nextTick()
+        triggerRef(messages)
+      } else {
+        // 在回答模式下，使用原来的逻辑
+        const shouldSend = contentBuffer.length > 20 || 
+                          (!contentBuffer.includes('<') && !contentBuffer.includes('>'))
+        
+        if (shouldSend) {
           console.log('Adding to answer, length:', contentBuffer.length)
           if (!answerStarted) {
             answerStarted = true
@@ -300,13 +316,12 @@ const sendMessage = async () => {
             botMessage.thinkingCollapsed = true
           }
           botMessage.content += contentBuffer
+          contentBuffer = ''
+          
+          // 强制触发Vue响应式更新
+          await nextTick()
+          triggerRef(messages)
         }
-        contentBuffer = ''
-        
-        // 强制触发Vue响应式更新
-        await nextTick()
-        // 额外的强制更新机制
-        triggerRef(messages)
       }
     }
   }
@@ -352,6 +367,9 @@ const sendMessage = async () => {
         }
         botMessage.typing = false
         loading.value = false
+        // 计算并更新用时
+        const endTime = Date.now()
+        userMessage.duration = endTime - startTime
         break
       }
       
@@ -421,6 +439,9 @@ const sendMessage = async () => {
                 }
                 botMessage.typing = false
                 loading.value = false
+                // 计算并更新用时
+                const endTime = Date.now()
+                userMessage.duration = endTime - startTime
                 break
                 
               case 'ERROR':
@@ -430,6 +451,9 @@ const sendMessage = async () => {
                 botMessage.sourceType = '🚨 系统错误'
                 botMessage.typing = false
                 loading.value = false
+                // 计算并更新用时
+                const errorTime = Date.now()
+                userMessage.duration = errorTime - startTime
                 break
                 
               default:
@@ -451,6 +475,9 @@ const sendMessage = async () => {
     botMessage.sourceType = '🚨 系统错误'
     botMessage.typing = false
     loading.value = false
+    // 计算并更新用时
+    const catchTime = Date.now()
+    userMessage.duration = catchTime - startTime
   }
   
   await nextTick()
@@ -540,7 +567,18 @@ const scrollToBottom = () => {
   color: var(--el-text-color-regular);
 }
 
+.message-time-info {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .message-time {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+
+.message-duration {
   font-size: 11px;
   color: var(--el-text-color-placeholder);
 }

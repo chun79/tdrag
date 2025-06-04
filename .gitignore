@@ -200,4 +200,41 @@ uploads/
 data/
 
 # Docker volumes数据
-volumes/ 
+volumes/
+
+# 测试和调试文件
+test_*.py
+test_*.js
+test_*.sh
+test_*.txt
+test_*.md
+debug_*.py
+debug_*.js
+debug-*.js
+*-test.js
+*-debug.js
+simple_analysis.py
+performance-analysis*.js
+performance-analysis*.md
+document-hit-*.js
+document-hit-*.md
+step-by-step-*.js
+precise-bottleneck-*.md
+thinking-process-*.md
+where-clause-*.md
+multiround-config-*.md
+fix-docker-*.sh
+quick_mysql_*.sh
+mysql_questions_*.sh
+
+# Python虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# 临时分析文件
+*-analysis.md
+*-report.md
+*-fix.md
+*-verification.md 

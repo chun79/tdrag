@@ -47,6 +47,7 @@ public class SmartQueryResponse {
     public enum SourceType {
         LIBRARY("图书馆资源"),
         GENERAL("通用知识"),
+        SYSTEM("系统提示"),
         ERROR("系统错误");
         
         private final String description;

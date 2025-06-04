@@ -33,7 +33,7 @@ public class RagService {
     @Value("${app.rag.max-context-length:8000}")
     private int maxContextLength;
     
-    @Value("${app.rag.enable-multi-round:true}")
+    @Value("${app.rag.enable-multi-round:false}")
     private boolean enableMultiRound;
     
     @Value("${app.rag.max-rounds:3}")
@@ -55,6 +55,16 @@ public class RagService {
             5. 回答要准确、简洁、有条理
             6. 如果可能，请引用具体的文档内容
             7. 使用中文回答
+            8. 可以在回答前使用<think>标签展示你的思考过程，然后在</think>标签后给出正式答案
+            9. **格式要求**：
+               - 使用清晰的段落结构，每个要点之间用空行分隔
+               - 使用序号（1. 2. 3.）或项目符号（- ）来组织列表
+               - 重要概念用**粗体**标记
+               - 代码或技术术语用`反引号`标记
+               - 使用恰当的标点符号和换行
+               - 保持逻辑清晰，结构完整
+            
+            **请确保你的回答格式良好、结构清晰、易于阅读。**
             
             回答：
             """;
@@ -154,7 +164,7 @@ public class RagService {
      */
     public void queryWithChunksStream(String question, List<DocumentChunk> relevantChunks, SseEmitter emitter, List<String> sources) {
         try {
-            log.info("开始流式处理RAG查询（使用预先搜索的文档块）: {}", question);
+            log.info("开始快速流式处理RAG查询（使用预先搜索的文档块）: {}", question);
             
             if (relevantChunks.isEmpty()) {
                 log.info("未提供相关文档块");
@@ -167,16 +177,16 @@ public class RagService {
                 return;
             }
             
-            log.info("使用 {} 个预先搜索的文档块", relevantChunks.size());
+            log.info("使用 {} 个预先搜索的文档块进行快速流式处理", relevantChunks.size());
             
-            // 构建上下文
-            String context = buildContext(relevantChunks);
+            // 直接构建上下文，不进行多轮查询
+            String context = buildContextFast(relevantChunks);
             
             // 生成流式回答
             generateResponseStream(question, context, emitter, sources);
             
         } catch (Exception e) {
-            log.error("流式RAG查询处理失败", e);
+            log.error("快速流式RAG查询处理失败", e);
             try {
                 emitter.send(StreamResponse.error("抱歉，处理您的问题时发生了错误，请稍后重试。"));
                 if (sources != null) {
@@ -291,7 +301,41 @@ public class RagService {
     }
     
     /**
-     * 构建上下文（动态长度）
+     * 快速构建上下文（性能优化版本）
+     */
+    private String buildContextFast(List<DocumentChunk> chunks) {
+        StringBuilder contextBuilder = new StringBuilder();
+        int currentLength = 0;
+        int fastMaxLength = 3000; // 固定使用较小的上下文长度以提高速度
+        
+        log.info("快速构建上下文，最大长度: {} 字符", fastMaxLength);
+        
+        for (DocumentChunk chunk : chunks) {
+            String chunkContent = chunk.getContent();
+            
+            // 检查是否超过最大上下文长度
+            if (currentLength + chunkContent.length() > fastMaxLength) {
+                // 截取部分内容
+                int remainingLength = fastMaxLength - currentLength;
+                if (remainingLength > 100) { // 至少保留100字符
+                    chunkContent = chunkContent.substring(0, remainingLength) + "...";
+                    contextBuilder.append(chunkContent).append("\n\n");
+                }
+                break;
+            }
+            
+            contextBuilder.append(chunkContent).append("\n\n");
+            currentLength += chunkContent.length() + 2; // +2 for \n\n
+        }
+        
+        String context = contextBuilder.toString().trim();
+        log.info("快速构建的上下文长度: {} 字符", context.length());
+        
+        return context;
+    }
+    
+    /**
+     * 构建上下文
      */
     private String buildContext(List<DocumentChunk> chunks) {
         StringBuilder contextBuilder = new StringBuilder();
@@ -342,6 +386,51 @@ public class RagService {
     }
     
     /**
+     * 过滤内容，去掉其他不需要的内容（保留思考标签给前端处理）
+     */
+    private String filterContent(String content) {
+        if (content == null) {
+            return "";
+        }
+        
+        // 不再过滤思考标签，让前端自行处理
+        // 只过滤其他不需要的内容
+        String filtered = content;
+        
+        // 过滤掉其他可能的思考标记（非标准格式）
+        filtered = filtered.replaceAll("\\[思考\\].*?\\[/思考\\]", "");
+        filtered = filtered.replaceAll("\\[思考\\]", "");
+        filtered = filtered.replaceAll("\\[/思考\\]", "");
+        
+        // 过滤掉空的思考内容
+        if (filtered.trim().equals("思考：") || filtered.trim().equals("思考:")) {
+            return "";
+        }
+        
+        // 过滤掉纯换行符
+        if (filtered.trim().isEmpty() || filtered.equals("\n")) {
+            return "";
+        }
+        
+        return filtered;
+    }
+    
+    /**
+     * 后处理完整响应（保留思考标签）
+     */
+    private String postProcessResponse(String response) {
+        if (response == null) {
+            return "";
+        }
+        
+        // 不再过滤思考标签，保持原始内容
+        // 只清理多余的空行
+        String filtered = response.replaceAll("\n{3,}", "\n\n");
+        
+        return filtered.trim();
+    }
+    
+    /**
      * 生成AI回答
      */
     private String generateResponse(String question, String context) {
@@ -356,7 +445,12 @@ public class RagService {
             String response = chatClient.prompt(prompt).call().content();
             
             log.info("AI模型响应长度: {} 字符", response.length());
-            return response;
+            
+            // 后处理响应，过滤思考标签
+            String filteredResponse = postProcessResponse(response);
+            log.info("过滤后响应长度: {} 字符", filteredResponse.length());
+            
+            return filteredResponse;
             
         } catch (Exception e) {
             log.error("生成AI回答失败", e);
@@ -377,14 +471,31 @@ public class RagService {
             
             log.info("发送流式提示到AI模型");
             
+            // 添加计数器和时间戳来验证流式行为
+            final long startTime = System.currentTimeMillis();
+            final java.util.concurrent.atomic.AtomicInteger chunkCount = new java.util.concurrent.atomic.AtomicInteger(0);
+            final java.util.concurrent.atomic.AtomicInteger sentCount = new java.util.concurrent.atomic.AtomicInteger(0);
+            
             // 使用流式调用
             chatClient.prompt(prompt).stream().content()
                 .doOnNext(chunk -> {
                     try {
+                        int currentChunk = chunkCount.incrementAndGet();
+                        long elapsed = System.currentTimeMillis() - startTime;
+                        
+                        log.info("🚀 接收到第 {} 个chunk ({}ms): [{}]", currentChunk, elapsed, 
+                                chunk.length() > 20 ? chunk.substring(0, 20) + "..." : chunk);
+                        
                         // 过滤掉思考标签和不需要的内容
                         String filteredChunk = filterContent(chunk);
+                        
                         if (!filteredChunk.isEmpty()) {
+                            int sentChunk = sentCount.incrementAndGet();
+                            log.info("📤 发送第 {} 个过滤后chunk ({}ms): [{}]", sentChunk, elapsed, 
+                                    filteredChunk.length() > 20 ? filteredChunk.substring(0, 20) + "..." : filteredChunk);
                             emitter.send(StreamResponse.chunk(filteredChunk));
+                        } else {
+                            log.info("🚫 第 {} 个chunk被过滤掉 ({}ms)", currentChunk, elapsed);
                         }
                     } catch (IOException e) {
                         log.error("发送流式内容失败", e);
@@ -392,7 +503,10 @@ public class RagService {
                 })
                 .doOnComplete(() -> {
                     try {
-                        log.info("流式AI回答生成完成");
+                        long totalTime = System.currentTimeMillis() - startTime;
+                        log.info("✅ 流式AI回答生成完成 - 总时间: {}ms, 接收chunks: {}, 发送chunks: {}", 
+                                totalTime, chunkCount.get(), sentCount.get());
+                        
                         // 发送来源信息和结束事件
                         if (sources != null) {
                             emitter.send(StreamResponse.source(sources));
@@ -437,40 +551,25 @@ public class RagService {
     }
     
     /**
-     * 过滤内容，去掉思考标签和其他不需要的内容
+     * 单轮查询处理（快速响应）
      */
-    private String filterContent(String content) {
-        if (content == null) {
-            return "";
+    public String queryWithChunksSingleRound(String question, List<DocumentChunk> relevantChunks) {
+        try {
+            log.info("开始单轮RAG查询处理: {}", question);
+            
+            if (relevantChunks.isEmpty()) {
+                log.info("未提供相关文档块");
+                return "抱歉，我在文档中没有找到与您问题相关的信息。请尝试用不同的方式描述您的问题。";
+            }
+            
+            log.info("使用 {} 个文档块进行单轮查询", relevantChunks.size());
+            
+            // 直接使用单轮处理，不进行多轮查询
+            return generateAnswerFromChunks(question, relevantChunks);
+            
+        } catch (Exception e) {
+            log.error("单轮RAG查询处理失败", e);
+            return "抱歉，处理您的问题时发生了错误，请稍后重试。";
         }
-        
-        // 保留原始内容，包括思考标签，让前端处理
-        String filtered = content;
-        
-        // 移除对思考标签的过滤，让前端处理
-        // 注释掉原来的过滤逻辑
-        /*
-        // 过滤掉 <think> 和 </think> 标签
-        if (filtered.contains("<think>") || filtered.contains("</think>")) {
-            return ""; // 完全过滤掉包含思考标签的内容
-        }
-        */
-        
-        // 过滤掉其他可能的思考标记（保留这些，因为它们不是我们要的格式）
-        filtered = filtered.replaceAll("\\[思考\\].*?\\[/思考\\]", "");
-        filtered = filtered.replaceAll("\\[思考\\]", "");
-        filtered = filtered.replaceAll("\\[/思考\\]", "");
-        
-        // 过滤掉空的思考内容
-        if (filtered.trim().equals("思考：") || filtered.trim().equals("思考:")) {
-            return "";
-        }
-        
-        // 过滤掉纯换行符（在思考标签之间的换行）
-        if (filtered.trim().isEmpty() || filtered.equals("\n")) {
-            return "";
-        }
-        
-        return filtered;
     }
 } 

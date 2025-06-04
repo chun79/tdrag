@@ -74,9 +74,9 @@ spring:
       chat:
         options:
           model: qwen3:14b
-          temperature: 0.7
-          top_p: 0.9
-          num_predict: 2048
+          temperature: 0.3
+          top_p: 0.8
+          num_predict: 4096
       embedding:
         options:
           model: nomic-embed-text
@@ -124,14 +124,14 @@ logging:
 
 # 应用自定义配置
 app:
-  # RAG配置
+  # RAG配置 - 性能优化
   rag:
     chunk-size: 1000
     chunk-overlap: 200
     similarity-threshold: 0.7
-    max-context-length: 8000  # 增加基础上下文长度
-    enable-multi-round: true  # 启用多轮查询
-    max-rounds: 3            # 最大查询轮数
+    max-context-length: 3000  # 减少上下文长度，提高速度
+    enable-multi-round: false  # 禁用多轮查询，使用单轮快速响应
+    max-rounds: 1            # 最大查询轮数设为1
     
   # 文件上传配置  
   upload:
@@ -142,8 +142,8 @@ app:
   # 模型配置
   model:
     chat:
-      fast: qwen3:14b      # 快速响应模型
-      quality: qwen3:32b   # 高质量模型
+      fast: qwen3:8b       # 快速响应模型
+      quality: qwen3:14b   # 高质量模型（备用）
       switch-threshold: 100 # 问题复杂度阈值
     embedding:
       default: nomic-embed-text
@@ -200,9 +200,43 @@ spring:
   ai:
     ollama:
       base-url: http://host.docker.internal:11434
+      chat:
+        options:
+          model: qwen3:14b
+          temperature: 0.3
+          top_p: 0.8
+          num_predict: 4096
+      embedding:
+        options:
+          model: nomic-embed-text
+    vectorstore:
+      elasticsearch:
+        initialize-schema: true
+        index-name: rag_vectors
+        dimensions: 768
+        similarity: cosine
 
 # Docker环境应用配置
 app:
+  # RAG配置 - Docker环境性能优化
+  rag:
+    chunk-size: 1000
+    chunk-overlap: 200
+    similarity-threshold: 0.7
+    max-context-length: 3000  # 减少上下文长度，提高速度
+    enable-multi-round: false  # 禁用多轮查询，使用单轮快速响应
+    max-rounds: 1            # 最大查询轮数设为1
+    
+  # 模型配置
+  model:
+    chat:
+      fast: qwen3:8b       # 快速响应模型
+      quality: qwen3:14b   # 高质量模型（备用）
+      switch-threshold: 100 # 问题复杂度阈值
+    embedding:
+      default: nomic-embed-text
+      fallback: all-minilm:l6-v2
+      
   upload:
     path: /app/uploads
     max-size: 52428800  # 50MB

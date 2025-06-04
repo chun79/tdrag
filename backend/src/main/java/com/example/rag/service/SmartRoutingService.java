@@ -22,6 +22,8 @@ import java.util.stream.Collectors;
 import java.util.Set;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 /**
  * 智能路由服务
@@ -38,11 +40,15 @@ public class SmartRoutingService {
     private final DocumentRepository documentRepository;
     private final DocumentChunkRepository documentChunkRepository;
     
-    // 图书馆相关关键词
+    // 为了测试开发方便，暂时禁用缓存机制
+    // private final Map<String, Boolean> queryConsistencyCache = new ConcurrentHashMap<>();
+    // private static final int MAX_CACHE_SIZE = 1000;
+    
+    // 图书馆相关关键词（移除硬编码的技术词汇，保持通用性）
     private static final List<String> LIBRARY_KEYWORDS = Arrays.asList(
         "图书", "期刊", "论文", "数据库", "馆藏", "借阅", "文献", "资料", 
-        "书籍", "杂志", "学术", "研究", "参考", "查阅", "检索", "索引",
-        "mysql", "数据库", "sql", "编程", "技术", "配置", "安装", "设置"
+        "书籍", "杂志", "学术", "研究", "参考", "查阅", "检索", "索引"
+        // 移除了硬编码的技术词汇，让系统更加通用
     );
     
     // 事实性查询模式
@@ -70,59 +76,113 @@ public class SmartRoutingService {
         Pattern.compile(".*生成.*", Pattern.CASE_INSENSITIVE)
     );
     
+    // 向量相似度阈值常量
+    private static final double SIMILARITY_THRESHOLD = 0.80; // 相似度阈值（实用标准）
+    private static final double HIGH_SIMILARITY_THRESHOLD = 0.85; // 高相似度阈值（实用标准）
+    
+    // 性能监控类
+    @lombok.Builder
+    @lombok.Data
+    private static class PerformanceMetrics {
+        private long totalStartTime;
+        private long vectorSearchStartTime;
+        private long vectorSearchEndTime;
+        private long contextBuildStartTime;
+        private long contextBuildEndTime;
+        private long aiProcessStartTime;
+        private long aiProcessEndTime;
+        private long totalEndTime;
+        
+        public long getVectorSearchDuration() {
+            return vectorSearchEndTime - vectorSearchStartTime;
+        }
+        
+        public long getContextBuildDuration() {
+            return contextBuildEndTime - contextBuildStartTime;
+        }
+        
+        public long getAiProcessDuration() {
+            return aiProcessEndTime - aiProcessStartTime;
+        }
+        
+        public long getTotalDuration() {
+            return totalEndTime - totalStartTime;
+        }
+        
+        public void logPerformanceBreakdown(String queryType) {
+            log.info("🔍 {} 性能分解:", queryType);
+            log.info("   📊 向量搜索: {}ms", getVectorSearchDuration());
+            log.info("   🔨 上下文构建: {}ms", getContextBuildDuration());  
+            log.info("   🤖 AI处理: {}ms", getAiProcessDuration());
+            log.info("   ⏱️  总耗时: {}ms", getTotalDuration());
+            log.info("   📈 向量搜索占比: {:.1f}%", (getVectorSearchDuration() * 100.0 / getTotalDuration()));
+            log.info("   📈 上下文构建占比: {:.1f}%", (getContextBuildDuration() * 100.0 / getTotalDuration()));
+            log.info("   📈 AI处理占比: {:.1f}%", (getAiProcessDuration() * 100.0 / getTotalDuration()));
+        }
+    }
+    
     /**
-     * 智能查询处理
+     * 智能路由查询
      */
     public SmartQueryResponse smartQuery(String question) {
+        PerformanceMetrics metrics = PerformanceMetrics.builder()
+            .totalStartTime(System.currentTimeMillis())
+            .build();
+            
+        // 添加空值检查
+        if (question == null || question.trim().isEmpty()) {
+            log.warn("收到空的查询请求");
+            return SmartQueryResponse.builder()
+                    .answer("请输入您的问题。")
+                    .source("系统提示")
+                    .sourceType(SmartQueryResponse.SourceType.SYSTEM)
+                    .relevant(false)
+                    .build();
+        }
+        
+        question = question.trim();
+        log.info("🚀 开始智能路由处理: {}", question);
+        
         try {
-            log.info("开始智能路由处理: {}", question);
+            // 简单问候语直接回复
+            if (isSimpleGreeting(question)) {
+                metrics.setTotalEndTime(System.currentTimeMillis());
+                log.info("⚡ 简单问候响应耗时: {}ms", metrics.getTotalDuration());
+                return SmartQueryResponse.builder()
+                        .answer("您好！我是RAG智能问答助手，可以帮您解答问题。有什么我可以帮助您的吗？")
+                        .source("智能助手")
+                        .sourceType(SmartQueryResponse.SourceType.GENERAL)
+                        .relevant(true)
+                        .build();
+            }
             
-            // 1. 分析问题类型
+            // 分析问题类型
             QuestionAnalysis analysis = analyzeQuestion(question);
-            log.info("问题分析结果: {}", analysis);
             
-            // 2. 对于简单问候语或非技术问题，直接使用通用AI
-            if (isSimpleGreeting(question) || (!analysis.preferLibraryResources && !analysis.isFactual)) {
-                log.info("简单问候语或非技术问题，直接使用通用AI");
-                return useGeneralAI(question);
+            // 优先尝试图书馆资源（快速检索）
+            SmartQueryResponse libraryResponse = tryLibraryResourcesFastWithMetrics(question, metrics);
+            if (libraryResponse != null) {
+                metrics.setTotalEndTime(System.currentTimeMillis());
+                metrics.logPerformanceBreakdown("📚 基于文档查询");
+                log.info("✅ 图书馆资源成功提供答案");
+                return libraryResponse;
             }
             
-            // 3. 优先尝试图书馆资源
-            if (analysis.preferLibraryResources || analysis.isFactual) {
-                SmartQueryResponse libraryResult = tryLibraryResources(question);
-                
-                // 如果找到相关内容，直接返回
-                if (libraryResult != null && libraryResult.isRelevant()) {
-                    log.info("使用图书馆资源回答");
-                    return libraryResult;
-                }
-                
-                log.info("图书馆资源无法提供相关信息，切换到通用AI");
-                return useGeneralAI(question);
-            }
-            
-            // 4. 创意性问题直接使用通用AI
-            if (analysis.isCreative) {
-                log.info("创意性问题，直接使用通用AI");
-                return useGeneralAI(question);
-            }
-            
-            // 5. 默认情况：尝试图书馆资源，失败则使用通用AI
-            SmartQueryResponse libraryResult = tryLibraryResources(question);
-            if (libraryResult != null && libraryResult.isRelevant()) {
-                log.info("使用图书馆资源回答");
-                return libraryResult;
-            } else {
-                log.info("图书馆资源无法提供相关信息，切换到通用AI");
-                return useGeneralAI(question);
-            }
+            // 图书馆资源无法提供相关信息，切换到通用AI
+            log.info("🤖 图书馆资源无法提供相关信息，切换到通用AI");
+            SmartQueryResponse generalResponse = useGeneralAIWithMetrics(question, metrics);
+            metrics.setTotalEndTime(System.currentTimeMillis());
+            metrics.logPerformanceBreakdown("🤖 通用AI查询");
+            return generalResponse;
             
         } catch (Exception e) {
-            log.error("智能路由处理失败", e);
+            metrics.setTotalEndTime(System.currentTimeMillis());
+            log.error("❌ 智能路由处理失败，耗时: {}ms", metrics.getTotalDuration(), e);
             return SmartQueryResponse.builder()
                     .answer("抱歉，处理您的问题时发生了错误，请稍后重试。")
                     .source("系统错误")
-                    .sourceType(SmartQueryResponse.SourceType.ERROR)
+                    .sourceType(SmartQueryResponse.SourceType.SYSTEM)
+                    .relevant(false)
                     .build();
         }
     }
@@ -138,40 +198,23 @@ public class SmartRoutingService {
             try {
                 log.info("开始流式智能路由处理: {}", question);
                 
-                // 1. 分析问题类型
-                QuestionAnalysis analysis = analyzeQuestion(question);
-                log.info("问题分析结果: {}", analysis);
-                
-                // 2. 对于简单问候语或非技术问题，直接使用通用AI
-                if (isSimpleGreeting(question) || (!analysis.preferLibraryResources && !analysis.isFactual)) {
-                    log.info("简单问候语或非技术问题，直接使用通用AI");
-                    useGeneralAIStream(question, emitter);
+                // 简单问候语直接回复
+                if (isSimpleGreeting(question)) {
+                    emitter.send(StreamResponse.start("🤖 智能助手"));
+                    emitter.send(StreamResponse.chunk("您好！我是RAG智能问答助手，可以帮您解答问题。有什么我可以帮助您的吗？"));
+                    emitter.send(StreamResponse.end());
+                    emitter.complete();
                     return;
                 }
                 
-                // 3. 优先尝试图书馆资源
-                if (analysis.preferLibraryResources || analysis.isFactual) {
-                    boolean librarySuccess = tryLibraryResourcesStream(question, emitter);
-                    
-                    if (!librarySuccess) {
-                        log.info("图书馆资源无法提供相关信息，切换到通用AI");
-                        useGeneralAIStream(question, emitter);
-                    }
-                    return;
-                }
+                // 预先进行质量检查，避免多次发送START响应
+                boolean librarySuccess = tryLibraryResourcesStreamWithPreCheck(question, emitter);
                 
-                // 4. 创意性问题直接使用通用AI
-                if (analysis.isCreative) {
-                    log.info("创意性问题，直接使用通用AI");
-                    useGeneralAIStream(question, emitter);
-                    return;
-                }
-                
-                // 5. 默认情况：尝试图书馆资源，失败则使用通用AI
-                boolean librarySuccess = tryLibraryResourcesStream(question, emitter);
                 if (!librarySuccess) {
-                    log.info("图书馆资源无法提供相关信息，切换到通用AI");
-                    useGeneralAIStream(question, emitter);
+                    log.info("图书馆资源无法提供相关信息，使用通用AI");
+                    // 直接发送通用AI的START响应并处理
+                    emitter.send(StreamResponse.start("🤖 基于通用知识"));
+                    useGeneralAIStreamWithoutStart(question, emitter);
                 }
                 
             } catch (Exception e) {
@@ -233,68 +276,71 @@ public class SmartRoutingService {
     }
     
     /**
-     * 尝试使用图书馆资源
+     * 尝试图书馆资源（带性能监控）- 基于客观相似度判断
      */
-    private SmartQueryResponse tryLibraryResources(String question) {
+    private SmartQueryResponse tryLibraryResourcesFastWithMetrics(String question, PerformanceMetrics metrics) {
         try {
-            // 使用向量搜索查找相关文档
-            List<DocumentChunk> relevantChunks = vectorSearchService.vectorSearch(question, 5);
+            // 开始向量搜索
+            metrics.setVectorSearchStartTime(System.currentTimeMillis());
+            log.info("🔍 开始向量搜索...");
             
-            // 总是尝试关键词搜索作为补充
-            log.info("执行关键词搜索补充");
-            List<DocumentChunk> keywordChunks = performKeywordSearch(question);
+            // 第一步：使用高阈值搜索，寻找高度相关的文档
+            List<DocumentChunk> highRelevantChunks = vectorSearchService.vectorSearchWithThreshold(question, 3, HIGH_SIMILARITY_THRESHOLD);
             
-            // 合并结果，去重，并优先排序包含关键词的文档块
-            Set<String> existingIds = relevantChunks.stream()
-                    .map(DocumentChunk::getId)
-                    .collect(Collectors.toSet());
-            
-            List<DocumentChunk> keywordOnlyChunks = keywordChunks.stream()
-                    .filter(chunk -> !existingIds.contains(chunk.getId()))
-                    .limit(Math.max(0, 8 - relevantChunks.size())) // 最多8个结果
-                    .collect(Collectors.toList());
-            
-            // 将关键词搜索结果放在前面，确保重要信息不会被截断
-            List<DocumentChunk> finalChunks = new ArrayList<>();
-            finalChunks.addAll(keywordOnlyChunks);
-            finalChunks.addAll(relevantChunks);
-            
-            log.info("合并后总共有 {} 个文档块，其中关键词搜索贡献 {} 个", finalChunks.size(), keywordOnlyChunks.size());
-            
-            if (finalChunks.isEmpty()) {
-                log.info("未找到相关文档");
-                return null; // 返回null表示无法提供相关信息
+            List<DocumentChunk> relevantChunks;
+            if (!highRelevantChunks.isEmpty()) {
+                log.info("✅ 找到 {} 个高度相关的文档块（阈值: {}）", highRelevantChunks.size(), HIGH_SIMILARITY_THRESHOLD);
+                relevantChunks = highRelevantChunks;
+            } else {
+                // 第二步：如果没有高度相关文档，尝试使用标准阈值
+                log.info("🔍 未找到高度相关文档，尝试标准阈值搜索...");
+                List<DocumentChunk> standardRelevantChunks = vectorSearchService.vectorSearchWithThreshold(question, 3, SIMILARITY_THRESHOLD);
+                
+                if (!standardRelevantChunks.isEmpty()) {
+                    log.info("✅ 找到 {} 个标准相关的文档块（阈值: {}）", standardRelevantChunks.size(), SIMILARITY_THRESHOLD);
+                    relevantChunks = standardRelevantChunks;
+                } else {
+                    log.info("❌ 没有找到相似度足够的相关文档，判定为不相关");
+                    metrics.setVectorSearchEndTime(System.currentTimeMillis());
+                    log.info("🔍 向量搜索完成，耗时: {}ms，未找到相关文档", metrics.getVectorSearchDuration());
+                    return null;
+                }
             }
             
-            // 使用RAG服务生成回答
-            String ragAnswer = ragService.queryWithChunks(question, finalChunks);
+            metrics.setVectorSearchEndTime(System.currentTimeMillis());
+            log.info("🔍 向量搜索完成，耗时: {}ms，找到 {} 个文档块", 
+                metrics.getVectorSearchDuration(), relevantChunks.size());
             
-            // 检查回答质量
-            boolean isRelevant = isAnswerRelevant(ragAnswer);
+            // 开始上下文构建
+            metrics.setContextBuildStartTime(System.currentTimeMillis());
+            log.info("🔨 开始构建上下文...");
             
-            if (!isRelevant) {
-                log.info("RAG回答质量不佳，判定为不相关");
-                return null; // 返回null表示无法提供相关信息
-            }
-            
-            // 提取文档来源 - 使用文档名称作为来源，过滤掉无效的documentId
-            List<String> sources = finalChunks.stream()
+            // 提取文档来源（这也是上下文构建的一部分）
+            List<String> sources = relevantChunks.stream()
                     .map(chunk -> {
-                        log.debug("查找文档ID: {}", chunk.getDocumentId());
                         Optional<Document> document = documentRepository.findByDocumentId(chunk.getDocumentId());
-                        if (document.isPresent()) {
-                            log.debug("找到文档: {}", document.get().getOriginalFilename());
-                            return document.get().getOriginalFilename();
-                        } else {
-                            log.warn("未找到文档ID: {} 对应的文档记录，跳过此来源", chunk.getDocumentId());
-                            return null; // 返回null，后续会被过滤掉
-                        }
+                        return document.map(Document::getOriginalFilename).orElse(null);
                     })
-                    .filter(filename -> filename != null) // 过滤掉null值
+                    .filter(filename -> filename != null)
                     .distinct()
                     .collect(Collectors.toList());
             
-            log.info("提取的文档来源: {}", sources);
+            metrics.setContextBuildEndTime(System.currentTimeMillis());
+            log.info("🔨 上下文构建完成，耗时: {}ms，提取来源: {}", 
+                metrics.getContextBuildDuration(), sources);
+            
+            // 开始AI处理
+            metrics.setAiProcessStartTime(System.currentTimeMillis());
+            log.info("🤖 开始AI处理...");
+            
+            // 使用单轮RAG查询（不使用多轮查询以提高速度）
+            String ragAnswer = ragService.queryWithChunksSingleRound(question, relevantChunks);
+            
+            metrics.setAiProcessEndTime(System.currentTimeMillis());
+            log.info("🤖 AI处理完成，耗时: {}ms，生成答案长度: {} 字符", 
+                metrics.getAiProcessDuration(), ragAnswer != null ? ragAnswer.length() : 0);
+            
+            log.info("✅ 基于客观相似度判断的文档查询成功");
             
             return SmartQueryResponse.builder()
                     .answer(ragAnswer)
@@ -305,96 +351,55 @@ public class SmartRoutingService {
                     .build();
                     
         } catch (Exception e) {
-            log.error("图书馆资源查询失败", e);
-            return null; // 返回null表示查询失败
-        }
-    }
-    
-    /**
-     * 执行关键词搜索
-     */
-    private List<DocumentChunk> performKeywordSearch(String question) {
-        try {
-            // 提取关键词
-            List<String> keywords = extractKeywords(question);
-            log.info("提取的关键词: {}", keywords);
-            
-            List<DocumentChunk> keywordResults = new ArrayList<>();
-            
-            // 对每个关键词进行搜索
-            for (String keyword : keywords) {
-                try {
-                    List<DocumentChunk> chunks = documentChunkRepository
-                            .findByContentContaining(keyword, PageRequest.of(0, 3))
-                            .getContent();
-                    
-                    // 去重添加
-                    Set<String> existingIds = keywordResults.stream()
-                            .map(DocumentChunk::getId)
-                            .collect(Collectors.toSet());
-                    
-                    chunks.stream()
-                            .filter(chunk -> !existingIds.contains(chunk.getId()))
-                            .forEach(keywordResults::add);
-                    
-                    log.info("关键词 '{}' 找到 {} 个结果", keyword, chunks.size());
-                    
-                } catch (Exception e) {
-                    log.warn("搜索关键词 '{}' 失败: {}", keyword, e.getMessage());
-                }
+            if (metrics.getVectorSearchStartTime() > 0 && metrics.getVectorSearchEndTime() == 0) {
+                metrics.setVectorSearchEndTime(System.currentTimeMillis());
+                log.error("❌ 向量搜索阶段失败，耗时: {}ms", metrics.getVectorSearchDuration(), e);
+            } else if (metrics.getContextBuildStartTime() > 0 && metrics.getContextBuildEndTime() == 0) {
+                metrics.setContextBuildEndTime(System.currentTimeMillis());
+                log.error("❌ 上下文构建阶段失败，耗时: {}ms", metrics.getContextBuildDuration(), e);
+            } else if (metrics.getAiProcessStartTime() > 0 && metrics.getAiProcessEndTime() == 0) {
+                metrics.setAiProcessEndTime(System.currentTimeMillis());
+                log.error("❌ AI处理阶段失败，耗时: {}ms", metrics.getAiProcessDuration(), e);
+            } else {
+                log.error("❌ 快速图书馆资源查询失败", e);
             }
-            
-            log.info("关键词搜索总共找到 {} 个结果", keywordResults.size());
-            return keywordResults;
-            
-        } catch (Exception e) {
-            log.error("关键词搜索失败", e);
-            return List.of();
+            return null;
         }
     }
     
     /**
-     * 提取关键词
+     * 使用通用AI（带性能监控）
      */
-    private List<String> extractKeywords(String question) {
-        String lowerQuestion = question.toLowerCase();
-        List<String> keywords = new ArrayList<>();
-        
-        // MySQL相关关键词
-        if (lowerQuestion.contains("mysql")) {
-            keywords.add("mysql");
-            keywords.add("3306");  // MySQL默认端口
-        }
-        
-        // 端口相关关键词
-        if (lowerQuestion.contains("端口") || lowerQuestion.contains("port")) {
-            keywords.add("端口");
-            keywords.add("port");
-            keywords.add("3306");
-            keywords.add("默认端口");
-        }
-        
-        // 默认相关关键词
-        if (lowerQuestion.contains("默认")) {
-            keywords.add("默认");
-            keywords.add("default");
-        }
-        
-        return keywords;
-    }
-    
-    /**
-     * 使用通用AI
-     */
-    private SmartQueryResponse useGeneralAI(String question) {
+    private SmartQueryResponse useGeneralAIWithMetrics(String question, PerformanceMetrics metrics) {
         try {
+            // 通用AI没有向量搜索和上下文构建步骤，直接开始AI处理
+            metrics.setVectorSearchStartTime(System.currentTimeMillis());
+            metrics.setVectorSearchEndTime(System.currentTimeMillis()); // 立即结束，耗时为0
+            
+            metrics.setContextBuildStartTime(System.currentTimeMillis());
+            metrics.setContextBuildEndTime(System.currentTimeMillis()); // 立即结束，耗时为0
+            
+            metrics.setAiProcessStartTime(System.currentTimeMillis());
+            log.info("🤖 开始通用AI处理...");
+            
             String prompt = String.format(
-                "请回答以下问题，提供准确、有用的信息：\n\n问题：%s\n\n" +
-                "请用中文回答，并保持回答的准确性和实用性。", 
+                "你是一个专业的AI助手。请详细回答以下问题，提供准确、全面、有用的信息。\n\n" +
+                "问题：%s\n\n" +
+                "回答要求：\n" +
+                "1. 请用中文回答，保持回答的准确性和实用性\n" +
+                "2. 提供完整、详细的信息，不要简略回答\n" +
+                "3. 如果是复杂话题，请分层次、分要点详细阐述\n" +
+                "4. 使用清晰的段落结构和适当的格式\n" +
+                "5. 确保回答完整，不要在中途停止\n\n" +
+                "请开始详细回答：", 
                 question
             );
             
             String answer = chatClient.prompt(prompt).call().content();
+            
+            metrics.setAiProcessEndTime(System.currentTimeMillis());
+            log.info("🤖 通用AI处理完成，耗时: {}ms，生成答案长度: {} 字符", 
+                metrics.getAiProcessDuration(), answer != null ? answer.length() : 0);
             
             return SmartQueryResponse.builder()
                     .answer(answer)
@@ -405,7 +410,12 @@ public class SmartRoutingService {
                     .build();
                     
         } catch (Exception e) {
-            log.error("通用AI查询失败", e);
+            if (metrics.getAiProcessStartTime() > 0 && metrics.getAiProcessEndTime() == 0) {
+                metrics.setAiProcessEndTime(System.currentTimeMillis());
+                log.error("❌ 通用AI处理失败，耗时: {}ms", metrics.getAiProcessDuration(), e);
+            } else {
+                log.error("❌ 通用AI查询失败", e);
+            }
             return SmartQueryResponse.builder()
                     .answer("抱歉，无法处理您的问题，请稍后重试。")
                     .source("🧠 基于通用知识")
@@ -416,18 +426,22 @@ public class SmartRoutingService {
     }
     
     /**
-     * 使用通用AI进行流式查询
+     * 使用通用AI进行流式查询（不发送START响应）
      */
-    private void useGeneralAIStream(String question, SseEmitter emitter) {
+    private void useGeneralAIStreamWithoutStart(String question, SseEmitter emitter) {
         try {
-            log.info("使用通用AI进行流式查询: {}", question);
-            
-            // 发送开始响应
-            emitter.send(StreamResponse.start("🤖 基于通用知识"));
+            log.info("使用通用AI进行流式查询（无START响应）: {}", question);
             
             String prompt = String.format(
-                "请回答以下问题，提供准确、有用的信息：\n\n问题：%s\n\n" +
-                "请用中文回答，并保持回答的准确性和实用性。", 
+                "你是一个专业的AI助手。请详细回答以下问题，提供准确、全面、有用的信息。\n\n" +
+                "问题：%s\n\n" +
+                "回答要求：\n" +
+                "1. 请用中文回答，保持回答的准确性和实用性\n" +
+                "2. 提供完整、详细的信息，不要简略回答\n" +
+                "3. 如果是复杂话题，请分层次、分要点详细阐述\n" +
+                "4. 使用清晰的段落结构和适当的格式\n" +
+                "5. 确保回答完整，不要在中途停止\n\n" +
+                "请开始详细回答：", 
                 question
             );
             
@@ -510,56 +524,67 @@ public class SmartRoutingService {
     }
     
     /**
-     * 流式尝试使用图书馆资源
+     * 使用通用AI进行流式查询（发送START响应）
      */
-    private boolean tryLibraryResourcesStream(String question, SseEmitter emitter) {
+    private void useGeneralAIStream(String question, SseEmitter emitter) {
         try {
-            // 使用向量搜索查找相关文档
-            List<DocumentChunk> relevantChunks = vectorSearchService.vectorSearch(question, 5);
+            log.info("使用通用AI进行流式查询: {}", question);
             
-            // 总是尝试关键词搜索作为补充
-            log.info("执行关键词搜索补充");
-            List<DocumentChunk> keywordChunks = performKeywordSearch(question);
+            // 发送开始响应
+            emitter.send(StreamResponse.start("🤖 基于通用知识"));
             
-            // 合并结果，去重，并优先排序包含关键词的文档块
-            Set<String> existingIds = relevantChunks.stream()
-                    .map(DocumentChunk::getId)
-                    .collect(Collectors.toSet());
+            // 调用不发送START响应的版本
+            useGeneralAIStreamWithoutStart(question, emitter);
+                
+        } catch (Exception e) {
+            log.error("通用AI流式查询失败", e);
+            try {
+                emitter.send(StreamResponse.error("抱歉，无法处理您的问题，请稍后重试。"));
+                emitter.complete();
+            } catch (IOException ioException) {
+                log.error("发送错误响应失败", ioException);
+                try {
+                    emitter.completeWithError(ioException);
+                } catch (Exception ex) {
+                    log.error("完成emitter失败", ex);
+                }
+            }
+        }
+    }
+    
+    /**
+     * 带预检查的快速流式图书馆资源查询 - 基于客观相似度判断
+     */
+    private boolean tryLibraryResourcesStreamWithPreCheck(String question, SseEmitter emitter) {
+        try {
+            // 第一步：使用高阈值搜索，寻找高度相关的文档
+            List<DocumentChunk> highRelevantChunks = vectorSearchService.vectorSearchWithThreshold(question, 3, HIGH_SIMILARITY_THRESHOLD);
             
-            List<DocumentChunk> keywordOnlyChunks = keywordChunks.stream()
-                    .filter(chunk -> !existingIds.contains(chunk.getId()))
-                    .limit(Math.max(0, 8 - relevantChunks.size())) // 最多8个结果
-                    .collect(Collectors.toList());
-            
-            // 将关键词搜索结果放在前面，确保重要信息不会被截断
-            List<DocumentChunk> finalChunks = new ArrayList<>();
-            finalChunks.addAll(keywordOnlyChunks);
-            finalChunks.addAll(relevantChunks);
-            
-            log.info("合并后总共有 {} 个文档块，其中关键词搜索贡献 {} 个", finalChunks.size(), keywordOnlyChunks.size());
-            
-            if (finalChunks.isEmpty()) {
-                log.info("未找到相关文档");
-                return false; // 返回false表示无法提供相关信息
+            List<DocumentChunk> relevantChunks;
+            if (!highRelevantChunks.isEmpty()) {
+                log.info("✅ 流式查询找到 {} 个高度相关的文档块（阈值: {}）", highRelevantChunks.size(), HIGH_SIMILARITY_THRESHOLD);
+                relevantChunks = highRelevantChunks;
+            } else {
+                // 第二步：如果没有高度相关文档，尝试使用标准阈值
+                log.info("🔍 流式查询未找到高度相关文档，尝试标准阈值搜索...");
+                List<DocumentChunk> standardRelevantChunks = vectorSearchService.vectorSearchWithThreshold(question, 3, SIMILARITY_THRESHOLD);
+                
+                if (!standardRelevantChunks.isEmpty()) {
+                    log.info("✅ 流式查询找到 {} 个标准相关的文档块（阈值: {}）", standardRelevantChunks.size(), SIMILARITY_THRESHOLD);
+                    relevantChunks = standardRelevantChunks;
+                } else {
+                    log.info("❌ 流式查询没有找到相似度足够的相关文档，判定为不相关");
+                    return false; // 返回false表示无法提供相关信息
+                }
             }
             
-            // 预检查：先用非流式方式快速生成一个简短回答，检查质量
-            log.info("执行RAG回答质量预检查");
-            String preCheckAnswer = ragService.queryWithChunks(question, finalChunks);
+            log.info("✅ 基于客观相似度判断，文档内容相关，开始基于文档的流式输出");
             
-            if (!isAnswerRelevant(preCheckAnswer)) {
-                log.info("预检查发现RAG回答不相关，切换到通用AI: {}", 
-                    preCheckAnswer.substring(0, Math.min(100, preCheckAnswer.length())));
-                return false; // 返回false让系统切换到通用AI
-            }
-            
-            log.info("预检查通过，RAG回答相关，开始流式输出");
-            
-            // 发送开始响应（只有在预检查通过后才发送）
+            // 发送基于文档的START响应
             emitter.send(StreamResponse.start("📚 基于图书馆资源"));
             
-            // 提取文档来源 - 使用文档名称作为来源，过滤掉无效的documentId
-            List<String> sources = finalChunks.stream()
+            // 提取文档来源
+            List<String> sources = relevantChunks.stream()
                     .map(chunk -> {
                         log.debug("查找文档ID: {}", chunk.getDocumentId());
                         Optional<Document> document = documentRepository.findByDocumentId(chunk.getDocumentId());
@@ -577,69 +602,169 @@ public class SmartRoutingService {
             
             log.info("提取的文档来源: {}", sources);
             
-            // 使用RAG服务生成流式回答，传递sources参数，让RAG服务负责完成emitter
-            ragService.queryWithChunksStream(question, finalChunks, emitter, sources);
+            // 直接构建上下文并进行流式输出
+            String context = buildFastContext(relevantChunks);
+            generateFastStreamResponse(question, context, emitter, sources);
             
             return true;
                     
         } catch (Exception e) {
-            log.error("图书馆资源流式查询失败", e);
+            log.error("预检查图书馆资源流式查询失败", e);
             return false; // 返回false表示查询失败
         }
     }
     
     /**
-     * 判断回答是否相关
+     * 缓存查询结果以确保一致性
+     * 为了测试开发方便，暂时禁用此方法
      */
-    private boolean isAnswerRelevant(String answer) {
-        if (answer == null || answer.trim().isEmpty()) {
-            return false;
+    /*
+    private void cacheQueryResult(String cacheKey, boolean useDocument) {
+        // 简单的LRU策略：如果缓存太大，清理一半
+        if (queryConsistencyCache.size() >= MAX_CACHE_SIZE) {
+            log.info("查询缓存已满，清理旧条目");
+            queryConsistencyCache.clear(); // 简单清理策略
         }
         
-        // 提取实际的回答内容（去除思考标签）
-        String actualAnswer = extractActualAnswer(answer);
-        String lowerAnswer = actualAnswer.toLowerCase();
+        queryConsistencyCache.put(cacheKey, useDocument);
+        log.debug("缓存查询结果: {} -> {}", cacheKey, useDocument ? "文档" : "通用AI");
+    }
+    */
+    
+    /**
+     * 快速构建上下文
+     */
+    private String buildFastContext(List<DocumentChunk> chunks) {
+        StringBuilder contextBuilder = new StringBuilder();
+        int currentLength = 0;
+        int fastMaxLength = 2000; // 进一步减少上下文长度以提高速度
         
-        log.debug("原始回答长度: {}, 实际回答长度: {}", answer.length(), actualAnswer.length());
+        log.info("快速构建上下文，最大长度: {} 字符", fastMaxLength);
         
-        // 检查明确的否定表述
-        List<String> negativeIndicators = Arrays.asList(
-            "无法找到相关信息", "没有找到相关信息", "未找到相关信息",
-            "无法找到", "没有找到", "未找到", "找不到",
-            "没有相关", "无相关", "无关信息",
-            "文档中没有", "文档中未", "文档中无",
-            "根据提供的文档内容，我无法",
-            "根据文档内容，我无法",
-            "抱歉", "无法", "不能"
-        );
-        
-        // 如果包含明确的否定表述，认为不相关
-        boolean hasNegativeIndicators = negativeIndicators.stream()
-                .anyMatch(indicator -> lowerAnswer.contains(indicator));
-        
-        if (hasNegativeIndicators) {
-            log.debug("检测到否定表述，判定为不相关: {}", actualAnswer.substring(0, Math.min(100, actualAnswer.length())));
-            return false;
+        for (DocumentChunk chunk : chunks) {
+            String chunkContent = chunk.getContent();
+            
+            // 检查是否超过最大上下文长度
+            if (currentLength + chunkContent.length() > fastMaxLength) {
+                // 截取部分内容
+                int remainingLength = fastMaxLength - currentLength;
+                if (remainingLength > 100) { // 至少保留100字符
+                    chunkContent = chunkContent.substring(0, remainingLength) + "...";
+                    contextBuilder.append(chunkContent).append("\n\n");
+                }
+                break;
+            }
+            
+            contextBuilder.append(chunkContent).append("\n\n");
+            currentLength += chunkContent.length() + 2; // +2 for \n\n
         }
         
-        // 检查是否包含实质性内容
-        // 如果回答很短且没有具体信息，可能不相关
-        if (actualAnswer.length() < 30) {
-            log.debug("实际回答过短，判定为不相关: {}", actualAnswer);
-            return false;
+        String context = contextBuilder.toString().trim();
+        log.info("快速构建的上下文长度: {} 字符", context.length());
+        
+        return context;
+    }
+    
+    /**
+     * 生成快速流式响应
+     */
+    private void generateFastStreamResponse(String question, String context, SseEmitter emitter, List<String> sources) {
+        try {
+            // 使用与RAG_PROMPT_TEMPLATE一致的提示模板，包含思考过程
+            String fastPrompt = String.format(
+                "你是一个专业的AI助手。请基于以下提供的文档内容来回答用户的问题。\n\n" +
+                "文档内容：\n%s\n\n" +
+                "用户问题：%s\n\n" +
+                "请遵循以下规则：\n" +
+                "1. 仔细分析文档内容，包括直接陈述和间接表述\n" +
+                "2. 基于文档内容进行合理的推理和理解\n" +
+                "3. 如果文档中没有直接的相关信息，请直接基于你的通用知识给出准确的答案\n" +
+                "4. 不要提及\"文档中没有找到\"或类似的表述，直接给出有用的答案\n" +
+                "5. 回答要准确、简洁、有条理\n" +
+                "6. 如果可能，请引用具体的文档内容\n" +
+                "7. 使用中文回答\n" +
+                "8. **重要**：必须先在<think>标签中展示你的思考过程，然后在</think>标签后给出正式答案\n" +
+                "9. **格式要求**：\n" +
+                "   - 使用清晰的段落结构，每个要点之间用空行分隔\n" +
+                "   - 使用序号（1. 2. 3.）或项目符号（- ）来组织列表\n" +
+                "   - 重要概念用**粗体**标记\n" +
+                "   - 代码或技术术语用`反引号`标记\n" +
+                "   - 使用恰当的标点符号和换行\n" +
+                "   - 保持逻辑清晰，结构完整\n\n" +
+                "回答格式（必须遵循）：\n" +
+                "<think>\n" +
+                "这里写出你的分析思考过程，包括对文档内容的理解、问题的分析、推理过程等。\n" +
+                "</think>\n\n" +
+                "**正式回答：**\n\n" +
+                "[在这里给出格式良好、结构清晰的正式答案，遵循上述格式要求]\n\n" +
+                "回答：",
+                context, question
+            );
+            
+            log.info("发送快速流式提示到AI模型");
+            
+            // 使用流式调用
+            chatClient.prompt(fastPrompt).stream().content()
+                .doOnNext(chunk -> {
+                    try {
+                        // 添加详细的chunk日志
+                        log.info("🔍 接收到流式chunk: [{}]", chunk);
+                        
+                        // 直接发送内容，不过滤思考标签（因为我们已经要求不要思考过程）
+                        if (!chunk.trim().isEmpty()) {
+                            log.info("📤 发送流式chunk: [{}]", chunk);
+                            emitter.send(StreamResponse.chunk(chunk));
+                        } else {
+                            log.info("🚫 跳过空chunk");
+                        }
+                    } catch (IOException e) {
+                        log.error("发送快速流式内容失败", e);
+                    }
+                })
+                .doOnComplete(() -> {
+                    try {
+                        log.info("快速流式AI回答生成完成");
+                        // 发送来源信息和结束事件
+                        if (sources != null) {
+                            emitter.send(StreamResponse.source(sources));
+                        }
+                        emitter.send(StreamResponse.end());
+                        emitter.complete();
+                    } catch (IOException e) {
+                        log.error("完成快速流式响应失败", e);
+                        emitter.completeWithError(e);
+                    }
+                })
+                .doOnError(error -> {
+                    log.error("生成快速流式AI回答失败", error);
+                    try {
+                        emitter.send(StreamResponse.error("抱歉，生成回答时发生了错误。"));
+                        if (sources != null) {
+                            emitter.send(StreamResponse.source(sources));
+                        }
+                        emitter.send(StreamResponse.end());
+                        emitter.complete();
+                    } catch (IOException e) {
+                        log.error("发送错误响应失败", e);
+                        emitter.completeWithError(e);
+                    }
+                })
+                .subscribe();
+                
+        } catch (Exception e) {
+            log.error("生成快速流式AI回答失败", e);
+            try {
+                emitter.send(StreamResponse.error("抱歉，生成回答时发生了错误。"));
+                if (sources != null) {
+                    emitter.send(StreamResponse.source(sources));
+                }
+                emitter.send(StreamResponse.end());
+                emitter.complete();
+            } catch (IOException ioException) {
+                log.error("发送错误响应失败", ioException);
+                emitter.completeWithError(ioException);
+            }
         }
-        
-        // 检查是否包含具体的事实或数据
-        boolean hasSpecificInfo = lowerAnswer.matches(".*\\d+.*") || // 包含数字
-                                 lowerAnswer.contains("是") ||
-                                 lowerAnswer.contains("为") ||
-                                 lowerAnswer.contains("：") ||
-                                 lowerAnswer.contains("。") ||
-                                 lowerAnswer.contains("mysql") ||
-                                 lowerAnswer.contains("数据库");
-        
-        log.debug("回答相关性检查结果: {}, 包含具体信息: {}", !hasNegativeIndicators && hasSpecificInfo, hasSpecificInfo);
-        return hasSpecificInfo;
     }
     
     /**
@@ -650,28 +775,63 @@ public class SmartRoutingService {
             return "";
         }
         
+        log.info("🔍 原始AI回答长度: {} 字符", answer.length());
+        log.info("🔍 原始AI回答前200字符: {}", answer.substring(0, Math.min(200, answer.length())));
+        
         // 如果包含思考标签，提取思考标签之外的内容
-        if (answer.contains("<think>") && answer.contains("</think>")) {
-            // 找到最后一个</think>标签的位置
-            int lastThinkEndIndex = answer.lastIndexOf("</think>");
-            if (lastThinkEndIndex != -1) {
-                String afterThink = answer.substring(lastThinkEndIndex + 8).trim();
-                if (!afterThink.isEmpty()) {
-                    return afterThink;
+        if (answer.contains("<think>")) {
+            log.info("🔍 检测到思考标签，开始提取实际答案");
+            
+            // 查找</think>标签
+            if (answer.contains("</think>")) {
+                // 找到最后一个</think>标签的位置
+                int lastThinkEndIndex = answer.lastIndexOf("</think>");
+                if (lastThinkEndIndex != -1) {
+                    String afterThink = answer.substring(lastThinkEndIndex + 8).trim();
+                    log.info("🔍 </think>标签后的内容长度: {} 字符", afterThink.length());
+                    if (afterThink.length() > 0) {
+                        log.info("🔍 </think>标签后的内容前100字符: {}", afterThink.substring(0, Math.min(100, afterThink.length())));
+                        log.info("✅ 使用</think>后的内容作为实际答案");
+                        return afterThink;
+                    }
                 }
+            } else {
+                log.warn("⚠️ 检测到<think>但没有找到</think>，AI回答格式不规范");
             }
             
             // 如果</think>后面没有内容，提取<think>之前的内容
             int firstThinkStartIndex = answer.indexOf("<think>");
             if (firstThinkStartIndex > 0) {
                 String beforeThink = answer.substring(0, firstThinkStartIndex).trim();
-                if (!beforeThink.isEmpty()) {
+                log.info("🔍 <think>标签前的内容长度: {} 字符", beforeThink.length());
+                if (beforeThink.length() > 0) {
+                    log.info("🔍 <think>标签前的内容前100字符: {}", beforeThink.substring(0, Math.min(100, beforeThink.length())));
+                    log.info("✅ 使用<think>前的内容作为实际答案");
                     return beforeThink;
                 }
             }
+            
+            // 如果前后都没有内容，说明整个回答都是思考过程，这种情况下应该返回空或者使用通用AI
+            log.warn("⚠️ 思考标签前后都没有实际内容，AI回答可能完全是思考过程");
+            
+            // 最后的兜底策略：如果整个回答都被思考标签包围，尝试移除思考标签
+            if (answer.contains("</think>")) {
+                // 尝试完全移除思考标签区域
+                String result = answer.replaceAll("<think>.*?</think>", "").trim();
+                if (result.length() > 20) {
+                    log.info("🔧 移除思考标签后剩余内容长度: {} 字符", result.length());
+                    log.info("🔧 移除思考标签后的内容前100字符: {}", result.substring(0, Math.min(100, result.length())));
+                    return result;
+                }
+            }
+            
+            // 如果所有方法都失败，返回空字符串，让系统使用通用AI
+            log.warn("❌ 无法从思考标签中提取有效的实际答案，返回空字符串");
+            return "";
         }
         
         // 如果没有思考标签，返回原始内容
+        log.info("✅ 没有思考标签，使用原始内容作为实际答案");
         return answer.trim();
     }
     

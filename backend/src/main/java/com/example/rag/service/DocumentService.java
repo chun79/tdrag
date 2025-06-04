@@ -470,7 +470,7 @@ public class DocumentService {
     }
     
     /**
-     * 将文本分块（内存优化版本）
+     * 将文本分块（修复版本 - 防止版权页污染）
      */
     private List<String> splitIntoChunks(String text, int chunkSize, int overlap) {
         List<String> chunks = new java.util.ArrayList<>();
@@ -486,8 +486,13 @@ public class DocumentService {
         
         int start = 0;
         int textLength = text.length();
+        int maxIterations = (textLength / (chunkSize - overlap)) + 10; // 预估最大迭代次数
+        int iteration = 0;
         
-        while (start < textLength) {
+        log.debug("开始分块处理，文本长度: {}, 块大小: {}, 重叠: {}", textLength, chunkSize, overlap);
+        
+        while (start < textLength && iteration < maxIterations) {
+            iteration++;
             int end = Math.min(start + chunkSize, textLength);
             
             // 尝试在合适的位置分割，避免截断单词或句子
@@ -499,19 +504,37 @@ public class DocumentService {
                 }
             }
             
-            // 使用substring创建块，但立即添加到列表中
+            // 使用substring创建块
             String chunk = text.substring(start, end).trim();
             if (!chunk.isEmpty()) {
                 chunks.add(chunk);
+                log.debug("创建块 {}: 起始={}, 结束={}, 长度={}", chunks.size(), start, end, chunk.length());
             }
             
-            // 计算下一个起始位置
-            start = Math.max(start + 1, end - overlap);
+            // 🔧 修复分块算法：确保合理的步长
+            int nextStart = end - overlap;
             
-            // 防止无限循环
-            if (start >= textLength) break;
+            // 确保步长至少前进一定距离，避免无限循环
+            int minStep = Math.max(50, chunkSize / 20); // 最小步长
+            if (nextStart <= start) {
+                nextStart = start + minStep;
+                log.debug("步长过小，强制最小步长: {} -> {}", start, nextStart);
+            }
+            
+            start = nextStart;
+            
+            // 如果下一个起始位置已经超出文本范围，结束循环
+            if (start >= textLength) {
+                break;
+            }
         }
         
+        // 检查是否因为达到最大迭代次数而退出
+        if (iteration >= maxIterations) {
+            log.warn("达到最大迭代次数 {}，强制退出分块循环", maxIterations);
+        }
+        
+        log.info("分块完成，生成 {} 个块，迭代 {} 次", chunks.size(), iteration);
         return chunks;
     }
     
